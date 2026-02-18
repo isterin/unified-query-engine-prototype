@@ -2,71 +2,123 @@
 """
 Cross-Source Query Examples
 
-This script demonstrates querying across PostgreSQL and Iceberg data sources
-using DuckDB as a unified query engine.
+This script demonstrates querying across THREE INDEPENDENT data sources
+using DuckDB as a unified query engine:
+
+1. PostgreSQL Database (transactional)
+   - customers, products tables
+
+2. Iceberg Analytics Catalog (s3://analytics/)
+   - Separate catalog with its own metadata
+   - orders, events tables
+
+3. Iceberg Inventory Catalog (s3://inventory/)
+   - Separate catalog with its own metadata
+   - suppliers, inventory_levels, shipments tables
+
+This simulates a real federated data environment where an AI agent
+would need to query across completely independent data sources.
 
 Prerequisites:
-1. Docker services running: docker compose up -d
-2. Iceberg tables created: uv run python src/setup_iceberg.py
+    task setup
 
 Usage:
     uv run python examples/cross_source_queries.py
 """
 
 import sys
+import time
+from typing import Callable
 
 sys.path.insert(0, ".")
 
 from src.query_engine import QueryEngine
 
 
-def print_section(title: str):
+def print_section(title: str, source_info: str = ""):
     """Print a formatted section header."""
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print(f"  {title}")
-    print(f"{'=' * 60}\n")
+    if source_info:
+        print(f"  Source: {source_info}")
+    print(f"{'=' * 70}\n")
+
+
+def timed_query(qe: QueryEngine, sql: str) -> tuple:
+    """Execute a query and return (result, elapsed_time_ms)."""
+    start = time.perf_counter()
+    result = qe.query(sql)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    return result, elapsed_ms
+
+
+def print_result(result, elapsed_ms: float):
+    """Print query result with timing."""
+    print(result.to_string(index=False))
+    print(f"\n  ⏱  Query time: {elapsed_ms:.1f} ms")
 
 
 def main():
     print("Initializing Unified Query Engine...")
+    print("Connecting to THREE independent data sources:\n")
+    print("  1. PostgreSQL      → Transactional data (customers, products)")
+    print("  2. Iceberg Analytics → s3://analytics/ (orders, events)")
+    print("  3. Iceberg Inventory → s3://inventory/ (suppliers, shipments)")
+
     qe = QueryEngine()
+    total_query_time = 0.0
 
     # =========================================================================
     # 1. Explore Available Data Sources
     # =========================================================================
-    print_section("1. Available Data Sources")
+    print_section("1. Available Data Sources (3 Independent Sources)")
 
     sources = qe.get_available_sources()
-    print("PostgreSQL Tables:")
+
+    print("PostgreSQL Database:")
     for table in sources["postgres"].get("tables", []):
         print(f"  - postgres_db.public.{table}")
 
-    print("\nIceberg Tables:")
-    for name, path in sources["iceberg"]["tables"].items():
+    print("\nIceberg Analytics Catalog (s3://analytics/):")
+    for name, path in sources["iceberg_analytics"]["tables"].items():
+        print(f"  - {name}: {path}")
+
+    print("\nIceberg Inventory Catalog (s3://inventory/):")
+    for name, path in sources["iceberg_inventory"]["tables"].items():
         print(f"  - {name}: {path}")
 
     # =========================================================================
-    # 2. Simple PostgreSQL Query
+    # 2. PostgreSQL Query
     # =========================================================================
-    print_section("2. PostgreSQL: Customer Distribution by Region")
+    print_section("2. PostgreSQL: Customer Distribution", "PostgreSQL")
 
-    result = qe.query("""
+    result, elapsed = timed_query(
+        qe,
+        """
         SELECT 
             region,
             tier,
             COUNT(*) as customer_count
         FROM postgres_db.public.customers
         GROUP BY region, tier
-        ORDER BY region, tier
-    """)
-    print(result.to_string(index=False))
+        ORDER BY customer_count DESC
+        LIMIT 10
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # =========================================================================
-    # 3. Simple Iceberg Query
+    # 3. Iceberg Analytics Catalog Query
     # =========================================================================
-    print_section("3. Iceberg: Order Summary by Status")
+    print_section(
+        "3. Iceberg Analytics: Order Summary (2M orders)",
+        "Iceberg Catalog: s3://analytics/",
+    )
 
-    result = qe.query(f"""
+    result, elapsed = timed_query(
+        qe,
+        f"""
         SELECT 
             status,
             COUNT(*) as order_count,
@@ -75,101 +127,184 @@ def main():
         FROM {qe.iceberg("orders")}
         GROUP BY status
         ORDER BY total_revenue DESC
-    """)
-    print(result.to_string(index=False))
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # =========================================================================
-    # 4. Cross-Source JOIN: Customer Orders with Details
+    # 4. Iceberg Inventory Catalog Query
     # =========================================================================
-    print_section("4. Cross-Source JOIN: Top Customers by Revenue")
+    print_section(
+        "4. Iceberg Inventory: Supplier Overview", "Iceberg Catalog: s3://inventory/"
+    )
 
-    result = qe.query(f"""
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            supplier_id,
+            name,
+            country,
+            rating
+        FROM {qe.iceberg("suppliers")}
+        ORDER BY rating DESC
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 5. Cross-Source: PostgreSQL + Iceberg Analytics
+    # =========================================================================
+    print_section(
+        "5. Cross-Source: Top Customers by Revenue", "PostgreSQL + Iceberg Analytics"
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
         SELECT 
             c.name as customer_name,
             c.region,
             c.tier,
             COUNT(o.order_id) as total_orders,
-            ROUND(SUM(o.total_amount), 2) as total_spent,
-            ROUND(AVG(o.total_amount), 2) as avg_order_value
+            ROUND(SUM(o.total_amount), 2) as total_spent
         FROM postgres_db.public.customers c
         JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
         GROUP BY c.id, c.name, c.region, c.tier
         ORDER BY total_spent DESC
         LIMIT 10
-    """)
-    print(result.to_string(index=False))
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # =========================================================================
-    # 5. Three-Way JOIN: Customers + Orders + Products
+    # 6. Cross-Source: Two Iceberg Catalogs
     # =========================================================================
-    print_section("5. Three-Way JOIN: Product Performance by Customer Tier")
+    print_section(
+        "6. Cross-Catalog: Supplier Performance",
+        "Iceberg Analytics + Iceberg Inventory (two separate catalogs)",
+    )
 
-    result = qe.query(f"""
+    result, elapsed = timed_query(
+        qe,
+        f"""
         SELECT 
+            sup.name as supplier_name,
+            sup.country,
+            sup.rating,
+            COUNT(DISTINCT s.shipment_id) as total_shipments,
+            SUM(s.quantity) as total_units_shipped,
+            ROUND(100.0 * SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) / COUNT(*), 1) as delivery_rate_pct
+        FROM {qe.iceberg("suppliers")} sup
+        JOIN {qe.iceberg("shipments")} s ON sup.supplier_id = s.supplier_id
+        GROUP BY sup.supplier_id, sup.name, sup.country, sup.rating
+        ORDER BY total_shipments DESC
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 7. Three-Way: PostgreSQL + Both Iceberg Catalogs
+    # =========================================================================
+    print_section(
+        "7. Three-Source Join: Full Order Fulfillment",
+        "PostgreSQL + Iceberg Analytics + Iceberg Inventory",
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            c.region as customer_region,
             p.category as product_category,
-            c.tier as customer_tier,
-            COUNT(DISTINCT c.id) as unique_customers,
-            COUNT(o.order_id) as total_orders,
-            ROUND(SUM(o.total_amount), 2) as total_revenue
-        FROM postgres_db.public.customers c
-        JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
-        JOIN postgres_db.public.products p ON o.product_id = p.id
-        GROUP BY p.category, c.tier
-        ORDER BY p.category, total_revenue DESC
-    """)
-    print(result.to_string(index=False))
-
-    # =========================================================================
-    # 6. Analytical Query: Regional Performance Over Time
-    # =========================================================================
-    print_section("6. Analytical: Monthly Revenue by Region")
-
-    result = qe.query(f"""
-        SELECT 
-            DATE_TRUNC('month', o.order_date) as month,
-            c.region,
-            COUNT(o.order_id) as orders,
+            sup.country as supplier_country,
+            COUNT(DISTINCT o.order_id) as orders,
+            COUNT(DISTINCT s.shipment_id) as shipments,
             ROUND(SUM(o.total_amount), 2) as revenue
         FROM postgres_db.public.customers c
         JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
-        WHERE o.status NOT IN ('cancelled')
-        GROUP BY month, c.region
-        ORDER BY month, revenue DESC
-    """)
-    print(result.to_string(index=False))
+        JOIN postgres_db.public.products p ON o.product_id = p.id
+        JOIN {qe.iceberg("shipments")} s ON o.order_id = s.order_id
+        JOIN {qe.iceberg("suppliers")} sup ON s.supplier_id = sup.supplier_id
+        GROUP BY c.region, p.category, sup.country
+        ORDER BY revenue DESC
+        LIMIT 15
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # =========================================================================
-    # 7. Event Analytics: Customer Engagement from Iceberg Events
+    # 8. Inventory Analysis
     # =========================================================================
-    print_section("7. Event Analytics: Customer Engagement Metrics")
+    print_section("8. Low Stock Alert", "PostgreSQL + Iceberg Inventory")
 
-    result = qe.query(f"""
+    result, elapsed = timed_query(
+        qe,
+        f"""
         SELECT 
-            c.name as customer_name,
-            c.tier,
-            COUNT(DISTINCT e.session_id) as sessions,
-            COUNT(*) as total_events,
-            SUM(CASE WHEN e.event_type = 'purchase' THEN 1 ELSE 0 END) as purchases,
-            ROUND(
-                100.0 * SUM(CASE WHEN e.event_type = 'purchase' THEN 1 ELSE 0 END) / 
-                NULLIF(SUM(CASE WHEN e.event_type = 'checkout' THEN 1 ELSE 0 END), 0), 
-                1
-            ) as checkout_conversion_rate
+            p.name as product_name,
+            p.category,
+            i.warehouse_location,
+            i.quantity_on_hand,
+            i.reorder_point,
+            CASE 
+                WHEN i.quantity_on_hand < i.reorder_point THEN 'REORDER'
+                WHEN i.quantity_on_hand < i.reorder_point * 1.5 THEN 'LOW'
+                ELSE 'OK'
+            END as stock_status
+        FROM postgres_db.public.products p
+        JOIN {qe.iceberg("inventory_levels")} i ON p.id = i.product_id
+        WHERE i.quantity_on_hand < i.reorder_point
+        ORDER BY (i.reorder_point - i.quantity_on_hand) DESC
+        LIMIT 15
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 9. Time-Series Analysis
+    # =========================================================================
+    print_section("9. Monthly Revenue by Region and Supplier", "All Three Sources")
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            DATE_TRUNC('month', o.order_date) as month,
+            c.region as customer_region,
+            sup.country as supplier_country,
+            COUNT(DISTINCT o.order_id) as orders,
+            ROUND(SUM(o.total_amount), 2) as revenue
         FROM postgres_db.public.customers c
-        JOIN {qe.iceberg("events")} e ON c.id = e.customer_id
-        GROUP BY c.id, c.name, c.tier
-        HAVING COUNT(*) > 50
-        ORDER BY total_events DESC
-        LIMIT 10
-    """)
-    print(result.to_string(index=False))
+        JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
+        JOIN {qe.iceberg("shipments")} s ON o.order_id = s.order_id
+        JOIN {qe.iceberg("suppliers")} sup ON s.supplier_id = sup.supplier_id
+        WHERE o.order_date >= '2024-01-01'
+        GROUP BY month, c.region, sup.country
+        ORDER BY month DESC, revenue DESC
+        LIMIT 20
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # =========================================================================
-    # 8. Combining Orders and Events: Full Customer 360
+    # 10. Customer 360 View
     # =========================================================================
-    print_section("8. Customer 360: Orders + Events Combined")
+    print_section(
+        "10. Customer 360: Complete View",
+        "PostgreSQL + Iceberg Analytics + Iceberg Inventory",
+    )
 
-    result = qe.query(f"""
+    result, elapsed = timed_query(
+        qe,
+        f"""
         WITH customer_orders AS (
             SELECT 
                 customer_id,
@@ -184,10 +319,18 @@ def main():
             SELECT
                 customer_id,
                 COUNT(*) as event_count,
-                COUNT(DISTINCT session_id) as session_count,
-                MAX(event_timestamp) as last_activity
+                COUNT(DISTINCT session_id) as session_count
             FROM {qe.iceberg("events")}
             GROUP BY customer_id
+        ),
+        customer_shipments AS (
+            SELECT
+                o.customer_id,
+                COUNT(DISTINCT s.shipment_id) as shipment_count,
+                SUM(CASE WHEN s.status = 'delivered' THEN 1 ELSE 0 END) as delivered_count
+            FROM {qe.iceberg("orders")} o
+            JOIN {qe.iceberg("shipments")} s ON o.order_id = s.order_id
+            GROUP BY o.customer_id
         )
         SELECT 
             c.name,
@@ -196,22 +339,64 @@ def main():
             COALESCE(co.order_count, 0) as orders,
             ROUND(COALESCE(co.total_spent, 0), 2) as revenue,
             COALESCE(ce.session_count, 0) as sessions,
-            COALESCE(ce.event_count, 0) as events,
-            co.last_order_date,
-            ce.last_activity
+            COALESCE(cs.shipment_count, 0) as shipments,
+            COALESCE(cs.delivered_count, 0) as delivered
         FROM postgres_db.public.customers c
         LEFT JOIN customer_orders co ON c.id = co.customer_id
         LEFT JOIN customer_events ce ON c.id = ce.customer_id
+        LEFT JOIN customer_shipments cs ON c.id = cs.customer_id
         ORDER BY revenue DESC
         LIMIT 15
-    """)
-    print(result.to_string(index=False))
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 11. Supply Chain Analysis
+    # =========================================================================
+    print_section(
+        "11. Supply Chain: Product Flow", "PostgreSQL + Both Iceberg Catalogs"
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            p.name as product,
+            p.category,
+            COUNT(DISTINCT o.order_id) as total_orders,
+            SUM(o.quantity) as units_ordered,
+            SUM(CASE WHEN s.status = 'delivered' THEN s.quantity ELSE 0 END) as units_delivered,
+            ROUND(100.0 * SUM(CASE WHEN s.status = 'delivered' THEN s.quantity ELSE 0 END) / 
+                  NULLIF(SUM(o.quantity), 0), 1) as fulfillment_rate_pct,
+            COUNT(DISTINCT sup.supplier_id) as supplier_count
+        FROM postgres_db.public.products p
+        JOIN {qe.iceberg("orders")} o ON p.id = o.product_id
+        LEFT JOIN {qe.iceberg("shipments")} s ON o.order_id = s.order_id
+        LEFT JOIN {qe.iceberg("suppliers")} sup ON s.supplier_id = sup.supplier_id
+        GROUP BY p.id, p.name, p.category
+        ORDER BY total_orders DESC
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
 
     # Cleanup
     qe.close()
-    print("\n" + "=" * 60)
+
+    print("\n" + "=" * 70)
     print("  All examples completed successfully!")
-    print("=" * 60)
+    print("=" * 70)
+    print("\nSummary: Queried across 3 independent data sources:")
+    print("  - PostgreSQL database (transactional)")
+    print("  - Iceberg Analytics catalog (s3://analytics/)")
+    print("  - Iceberg Inventory catalog (s3://inventory/)")
+    print(
+        f"\n  Total query time: {total_query_time:.1f} ms ({total_query_time / 1000:.2f} s)"
+    )
+    print("\nThis demonstrates DuckDB's ability to federate queries across")
+    print("completely separate data systems - ideal for AI agent integration.")
 
 
 if __name__ == "__main__":

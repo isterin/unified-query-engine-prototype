@@ -21,26 +21,57 @@ class QueryEngine:
     - Getting schema information for available tables
     - Managing Iceberg table paths
 
+    Data Sources:
+    - PostgreSQL: Transactional data (customers, products)
+    - Iceberg Analytics Catalog: Customer analytics (orders, events)
+    - Iceberg Inventory Catalog: Supply chain data (suppliers, shipments, inventory)
+
     Example:
         qe = QueryEngine()
 
         # Simple query
         customers = qe.query("SELECT * FROM postgres_db.public.customers")
 
-        # Cross-source join
-        results = qe.query('''
+        # Cross-source join (PostgreSQL + Iceberg Analytics)
+        results = qe.query(f'''
             SELECT c.name, c.region, SUM(o.total_amount) as revenue
             FROM postgres_db.public.customers c
-            JOIN iceberg_scan('s3://warehouse/analytics/orders') o
-                ON c.id = o.customer_id
+            JOIN {qe.iceberg('orders')} o ON c.id = o.customer_id
             GROUP BY c.name, c.region
         ''')
     """
 
-    # Default Iceberg table paths (set after running setup_iceberg.py)
+    # Iceberg table paths organized by catalog
+    # These are TWO SEPARATE Iceberg catalogs with independent metadata and storage
+    ICEBERG_CATALOGS = {
+        "analytics": {
+            "description": "Customer analytics data lake",
+            "bucket": "s3://analytics",
+            "tables": {
+                "orders": "s3://analytics/default/orders",
+                "events": "s3://analytics/default/events",
+            },
+        },
+        "inventory": {
+            "description": "Supply chain data lake",
+            "bucket": "s3://inventory",
+            "tables": {
+                "suppliers": "s3://inventory/default/suppliers",
+                "inventory_levels": "s3://inventory/default/inventory_levels",
+                "shipments": "s3://inventory/default/shipments",
+            },
+        },
+    }
+
+    # Flat lookup for convenience
     ICEBERG_TABLES = {
-        "orders": "s3://warehouse/analytics/orders",
-        "events": "s3://warehouse/analytics/events",
+        # Analytics catalog
+        "orders": "s3://analytics/default/orders",
+        "events": "s3://analytics/default/events",
+        # Inventory catalog
+        "suppliers": "s3://inventory/default/suppliers",
+        "inventory_levels": "s3://inventory/default/inventory_levels",
+        "shipments": "s3://inventory/default/shipments",
     }
 
     def __init__(
@@ -112,9 +143,15 @@ class QueryEngine:
                 "prefix": "postgres_db.public",
                 "tables": [],
             },
-            "iceberg": {
-                "type": "Iceberg (S3/MinIO)",
-                "tables": dict(self.ICEBERG_TABLES),
+            "iceberg_analytics": {
+                "type": "Iceberg Catalog (Analytics)",
+                "bucket": "s3://analytics",
+                "tables": self.ICEBERG_CATALOGS["analytics"]["tables"],
+            },
+            "iceberg_inventory": {
+                "type": "Iceberg Catalog (Inventory)",
+                "bucket": "s3://inventory",
+                "tables": self.ICEBERG_CATALOGS["inventory"]["tables"],
             },
         }
 

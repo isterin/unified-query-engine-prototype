@@ -11,10 +11,10 @@ tasks:
 
   reset:
     desc: Reset everything - stop services and remove all data
-    prompt: This will delete all data (Postgres + Iceberg). Continue?
+    prompt: This will delete all data (Postgres + both Iceberg catalogs). Continue?
     cmds:
       - docker compose down -v
-      - rm -f data/iceberg_catalog.db
+      - rm -f data/analytics_catalog.db data/inventory_catalog.db
 
   up:
     desc: Start Docker services (Postgres + MinIO)

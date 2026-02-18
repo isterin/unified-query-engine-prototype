@@ -35,7 +35,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # One-time setup container to create MinIO bucket
+  # One-time setup container to create MinIO buckets
   minio-setup:
     image: minio/mc:latest
     container_name: uqe-minio-setup
@@ -45,9 +45,11 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set myminio http://minio:9000 minioadmin minioadmin;
-      mc mb myminio/warehouse --ignore-existing;
-      mc anonymous set public myminio/warehouse;
-      echo 'MinIO bucket setup complete';
+      mc mb myminio/analytics --ignore-existing;
+      mc mb myminio/inventory --ignore-existing;
+      mc anonymous set public myminio/analytics;
+      mc anonymous set public myminio/inventory;
+      echo 'MinIO buckets created: analytics, inventory';
       exit 0;
       "
 
