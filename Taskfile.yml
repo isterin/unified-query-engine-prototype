@@ -1,0 +1,41 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: Full setup - install deps, start services, create Iceberg tables
+    cmds:
+      - uv sync
+      - docker compose up -d
+      - task: _wait-healthy
+      - uv run python src/setup_iceberg.py
+
+  reset:
+    desc: Reset everything - stop services and remove all data
+    prompt: This will delete all data (Postgres + Iceberg). Continue?
+    cmds:
+      - docker compose down -v
+      - rm -f data/iceberg_catalog.db
+
+  up:
+    desc: Start Docker services (Postgres + MinIO)
+    cmds:
+      - docker compose up -d
+
+  down:
+    desc: Stop Docker services
+    cmds:
+      - docker compose down
+
+  _wait-healthy:
+    desc: Wait for Postgres and MinIO to be healthy
+    internal: true
+    cmds:
+      - |
+        echo "Waiting for services to be healthy..."
+        until docker compose ps postgres --format json | grep -q '"Health":"healthy"'; do
+          sleep 1
+        done
+        until docker compose ps minio --format json | grep -q '"Health":"healthy"'; do
+          sleep 1
+        done
+        echo "Services are healthy"
