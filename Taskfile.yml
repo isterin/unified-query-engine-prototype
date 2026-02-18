@@ -2,16 +2,17 @@ version: '3'
 
 tasks:
   setup:
-    desc: Full setup - install deps, start services, create Iceberg tables
+    desc: Full setup - install deps, start services, create Iceberg and Delta tables
     cmds:
       - uv sync
       - docker compose up -d
       - task: _wait-healthy
       - uv run python src/setup_iceberg.py
+      - uv run python src/setup_delta.py
 
   reset:
     desc: Reset everything - stop services and remove all data
-    prompt: This will delete all data (Postgres + both Iceberg catalogs). Continue?
+    prompt: This will delete all data (Postgres + Iceberg + Delta tables). Continue?
     cmds:
       - docker compose down -v
       - rm -f data/analytics_catalog.db data/inventory_catalog.db

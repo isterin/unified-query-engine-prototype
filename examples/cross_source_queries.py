@@ -2,7 +2,7 @@
 """
 Cross-Source Query Examples
 
-This script demonstrates querying across THREE INDEPENDENT data sources
+This script demonstrates querying across FOUR INDEPENDENT data sources
 using DuckDB as a unified query engine:
 
 1. PostgreSQL Database (transactional)
@@ -16,6 +16,9 @@ using DuckDB as a unified query engine:
    - Separate catalog with its own metadata
    - suppliers, inventory_levels, shipments tables
 
+4. Delta Lake (s3://delta/)
+   - Product reviews table (product_reviews)
+
 This simulates a real federated data environment where an AI agent
 would need to query across completely independent data sources.
 
@@ -28,7 +31,6 @@ Usage:
 
 import sys
 import time
-from typing import Callable
 
 sys.path.insert(0, ".")
 
@@ -60,10 +62,11 @@ def print_result(result, elapsed_ms: float):
 
 def main():
     print("Initializing Unified Query Engine...")
-    print("Connecting to THREE independent data sources:\n")
-    print("  1. PostgreSQL      → Transactional data (customers, products)")
+    print("Connecting to FOUR independent data sources:\n")
+    print("  1. PostgreSQL        → Transactional data (customers, products)")
     print("  2. Iceberg Analytics → s3://analytics/ (orders, events)")
     print("  3. Iceberg Inventory → s3://inventory/ (suppliers, shipments)")
+    print("  4. Delta Lake        → s3://delta/ (product_reviews)")
 
     qe = QueryEngine()
     total_query_time = 0.0
@@ -71,7 +74,7 @@ def main():
     # =========================================================================
     # 1. Explore Available Data Sources
     # =========================================================================
-    print_section("1. Available Data Sources (3 Independent Sources)")
+    print_section("1. Available Data Sources (4 Independent Sources)")
 
     sources = qe.get_available_sources()
 
@@ -85,6 +88,10 @@ def main():
 
     print("\nIceberg Inventory Catalog (s3://inventory/):")
     for name, path in sources["iceberg_inventory"]["tables"].items():
+        print(f"  - {name}: {path}")
+
+    print("\nDelta Lake (s3://delta/):")
+    for name, path in sources["delta"]["tables"].items():
         print(f"  - {name}: {path}")
 
     # =========================================================================
@@ -382,16 +389,133 @@ def main():
     print_result(result, elapsed)
     total_query_time += elapsed
 
+    # =========================================================================
+    # 12. Delta Lake Query
+    # =========================================================================
+    print_section(
+        "12. Delta Lake: Product Reviews",
+        "Delta Lake: s3://delta/",
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            rating,
+            sentiment,
+            COUNT(*) as review_count,
+            ROUND(AVG(helpful_votes), 1) as avg_helpful_votes
+        FROM {qe.delta("product_reviews")}
+        GROUP BY rating, sentiment
+        ORDER BY rating DESC
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 13. Cross-Source: PostgreSQL + Delta Lake
+    # =========================================================================
+    print_section(
+        "13. Cross-Source: Customer Reviews Analysis",
+        "PostgreSQL + Delta Lake",
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            c.region,
+            c.tier,
+            COUNT(r.review_id) as total_reviews,
+            ROUND(AVG(r.rating), 2) as avg_rating,
+            SUM(CASE WHEN r.sentiment = 'positive' THEN 1 ELSE 0 END) as positive_count,
+            SUM(CASE WHEN r.sentiment = 'negative' THEN 1 ELSE 0 END) as negative_count
+        FROM postgres_db.public.customers c
+        JOIN {qe.delta("product_reviews")} r ON c.id = r.customer_id
+        GROUP BY c.region, c.tier
+        ORDER BY total_reviews DESC
+        LIMIT 15
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 14. Four-Source Join: PostgreSQL + Iceberg + Delta Lake
+    # =========================================================================
+    print_section(
+        "14. Four-Source Join: Complete Customer Satisfaction",
+        "PostgreSQL + Iceberg Analytics + Iceberg Inventory + Delta Lake",
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            c.region,
+            p.category as product_category,
+            sup.country as supplier_country,
+            COUNT(DISTINCT o.order_id) as orders,
+            COUNT(DISTINCT r.review_id) as reviews,
+            ROUND(AVG(r.rating), 2) as avg_rating,
+            ROUND(SUM(o.total_amount), 2) as revenue
+        FROM postgres_db.public.customers c
+        JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
+        JOIN postgres_db.public.products p ON o.product_id = p.id
+        JOIN {qe.iceberg("shipments")} s ON o.order_id = s.order_id
+        JOIN {qe.iceberg("suppliers")} sup ON s.supplier_id = sup.supplier_id
+        LEFT JOIN {qe.delta("product_reviews")} r ON o.order_id = r.order_id
+        WHERE r.review_id IS NOT NULL
+        GROUP BY c.region, p.category, sup.country
+        ORDER BY avg_rating DESC, revenue DESC
+        LIMIT 15
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
+    # =========================================================================
+    # 15. Product Performance with Reviews
+    # =========================================================================
+    print_section(
+        "15. Product Performance: Sales vs Reviews",
+        "PostgreSQL + Iceberg Analytics + Delta Lake",
+    )
+
+    result, elapsed = timed_query(
+        qe,
+        f"""
+        SELECT 
+            p.name as product,
+            p.category,
+            COUNT(DISTINCT o.order_id) as total_orders,
+            ROUND(SUM(o.total_amount), 2) as total_revenue,
+            COUNT(DISTINCT r.review_id) as review_count,
+            ROUND(AVG(r.rating), 2) as avg_rating,
+            ROUND(100.0 * SUM(CASE WHEN r.sentiment = 'positive' THEN 1 ELSE 0 END) / 
+                  NULLIF(COUNT(r.review_id), 0), 1) as positive_pct
+        FROM postgres_db.public.products p
+        JOIN {qe.iceberg("orders")} o ON p.id = o.product_id
+        LEFT JOIN {qe.delta("product_reviews")} r ON o.order_id = r.order_id
+        GROUP BY p.id, p.name, p.category
+        ORDER BY total_revenue DESC
+    """,
+    )
+    print_result(result, elapsed)
+    total_query_time += elapsed
+
     # Cleanup
     qe.close()
 
     print("\n" + "=" * 70)
     print("  All examples completed successfully!")
     print("=" * 70)
-    print("\nSummary: Queried across 3 independent data sources:")
+    print("\nSummary: Queried across 4 independent data sources:")
     print("  - PostgreSQL database (transactional)")
     print("  - Iceberg Analytics catalog (s3://analytics/)")
     print("  - Iceberg Inventory catalog (s3://inventory/)")
+    print("  - Delta Lake (s3://delta/)")
     print(
         f"\n  Total query time: {total_query_time:.1f} ms ({total_query_time / 1000:.2f} s)"
     )

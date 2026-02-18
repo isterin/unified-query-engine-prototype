@@ -2,14 +2,14 @@
 Query engine module providing high-level interface for cross-source queries.
 
 This module wraps the connection layer and provides convenient methods
-for executing queries across PostgreSQL and Iceberg data sources.
+for executing queries across PostgreSQL, Iceberg, and Delta Lake data sources.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from .connections import PostgresConfig, S3Config, UnifiedQueryEngine, create_engine
+from .connections import UnifiedQueryEngine, create_engine
 
 
 class QueryEngine:
@@ -19,12 +19,13 @@ class QueryEngine:
     This class provides a simplified interface for:
     - Executing SQL queries across multiple data sources
     - Getting schema information for available tables
-    - Managing Iceberg table paths
+    - Managing Iceberg and Delta Lake table paths
 
     Data Sources:
     - PostgreSQL: Transactional data (customers, products)
     - Iceberg Analytics Catalog: Customer analytics (orders, events)
     - Iceberg Inventory Catalog: Supply chain data (suppliers, shipments, inventory)
+    - Delta Lake: Product reviews (product_reviews)
 
     Example:
         qe = QueryEngine()
@@ -38,6 +39,14 @@ class QueryEngine:
             FROM postgres_db.public.customers c
             JOIN {qe.iceberg('orders')} o ON c.id = o.customer_id
             GROUP BY c.name, c.region
+        ''')
+
+        # Four-source join (PostgreSQL + Iceberg + Delta Lake)
+        results = qe.query(f'''
+            SELECT c.name, r.rating, r.review_text
+            FROM postgres_db.public.customers c
+            JOIN {qe.iceberg('orders')} o ON c.id = o.customer_id
+            JOIN {qe.delta('product_reviews')} r ON o.order_id = r.order_id
         ''')
     """
 
@@ -72,6 +81,11 @@ class QueryEngine:
         "suppliers": "s3://inventory/default/suppliers",
         "inventory_levels": "s3://inventory/default/inventory_levels",
         "shipments": "s3://inventory/default/shipments",
+    }
+
+    # Delta Lake tables
+    DELTA_TABLES = {
+        "product_reviews": "s3://delta/product_reviews",
     }
 
     def __init__(
@@ -130,6 +144,26 @@ class QueryEngine:
             )
         return f"iceberg_scan('{self.ICEBERG_TABLES[table_name]}')"
 
+    def delta(self, table_name: str) -> str:
+        """
+        Get the delta_scan SQL fragment for a Delta Lake table.
+
+        Args:
+            table_name: Short name like 'product_reviews'
+
+        Returns:
+            SQL fragment like "delta_scan('s3://delta/product_reviews')"
+        """
+        if table_name not in self.DELTA_TABLES:
+            raise ValueError(
+                f"Unknown Delta Lake table: {table_name}. "
+                f"Available tables: {list(self.DELTA_TABLES.keys())}"
+            )
+        return f"delta_scan('{self.DELTA_TABLES[table_name]}')"
+
+    # Backward compatibility alias
+    unity = delta
+
     def get_available_sources(self) -> Dict[str, Any]:
         """
         Return information about all available data sources.
@@ -153,6 +187,11 @@ class QueryEngine:
                 "bucket": "s3://inventory",
                 "tables": self.ICEBERG_CATALOGS["inventory"]["tables"],
             },
+            "delta": {
+                "type": "Delta Lake",
+                "bucket": "s3://delta",
+                "tables": self.DELTA_TABLES,
+            },
         }
 
         # Try to get PostgreSQL tables
@@ -169,7 +208,7 @@ class QueryEngine:
         Describe the schema of a table.
 
         Args:
-            source: 'postgres' or 'iceberg'
+            source: 'postgres', 'iceberg', or 'unity'
             table: Table name
 
         Returns:
@@ -181,6 +220,10 @@ class QueryEngine:
             if table not in self.ICEBERG_TABLES:
                 raise ValueError(f"Unknown Iceberg table: {table}")
             return self.query(f"DESCRIBE SELECT * FROM {self.iceberg(table)}")
+        elif source == "delta":
+            if table not in self.DELTA_TABLES:
+                raise ValueError(f"Unknown Delta Lake table: {table}")
+            return self.query(f"DESCRIBE SELECT * FROM {self.delta(table)}")
         else:
             raise ValueError(f"Unknown source: {source}")
 
@@ -189,7 +232,7 @@ class QueryEngine:
         Preview data from a table.
 
         Args:
-            source: 'postgres' or 'iceberg'
+            source: 'postgres', 'iceberg', or 'unity'
             table: Table name
             limit: Number of rows to return
 
@@ -200,6 +243,8 @@ class QueryEngine:
             return self.query(f"SELECT * FROM postgres_db.public.{table} LIMIT {limit}")
         elif source == "iceberg":
             return self.query(f"SELECT * FROM {self.iceberg(table)} LIMIT {limit}")
+        elif source == "delta":
+            return self.query(f"SELECT * FROM {self.delta(table)} LIMIT {limit}")
         else:
             raise ValueError(f"Unknown source: {source}")
 

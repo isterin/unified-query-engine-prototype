@@ -16,7 +16,7 @@ Data is written in batches to manage memory usage.
 
 import random
 from datetime import datetime, timedelta
-from typing import Generator, Dict, List, Any
+from typing import Dict, List
 
 import pyarrow as pa
 from pyiceberg.catalog.sql import SqlCatalog
@@ -512,7 +512,7 @@ def setup_analytics_catalog():
     Setup the ANALYTICS Iceberg catalog with batched writes.
     """
     print(f"\n{'=' * 70}")
-    print(f"  ANALYTICS CATALOG")
+    print("  ANALYTICS CATALOG")
     print(f"  Metadata: {ANALYTICS_CATALOG_DB}")
     print(f"  Storage:  {ANALYTICS_WAREHOUSE}")
     print(f"{'=' * 70}")
@@ -598,7 +598,7 @@ def setup_inventory_catalog(all_order_data: List[Dict]):
     Setup the INVENTORY Iceberg catalog with batched writes.
     """
     print(f"\n{'=' * 70}")
-    print(f"  INVENTORY CATALOG")
+    print("  INVENTORY CATALOG")
     print(f"  Metadata: {INVENTORY_CATALOG_DB}")
     print(f"  Storage:  {INVENTORY_WAREHOUSE}")
     print(f"{'=' * 70}")

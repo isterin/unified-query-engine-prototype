@@ -2,7 +2,8 @@
 DuckDB connection management with multi-source support.
 
 This module provides a unified interface for connecting DuckDB to multiple
-data sources including PostgreSQL and Iceberg tables stored in S3-compatible storage.
+data sources including PostgreSQL, Iceberg tables, and Delta Lake tables
+stored in S3-compatible storage.
 """
 
 import duckdb
@@ -45,6 +46,7 @@ class UnifiedQueryEngine:
     Supports:
     - PostgreSQL via the postgres extension
     - Iceberg tables via the iceberg extension (reading from S3/MinIO)
+    - Delta Lake tables via the delta extension (reading from S3/MinIO)
     - Local files (Parquet, CSV, etc.)
 
     Example:
@@ -87,11 +89,13 @@ class UnifiedQueryEngine:
         self._install_extensions()
         self._configure_s3()
         self._attach_postgres()
+        # Note: Unity Catalog Delta tables are accessed via delta_scan()
+        # rather than the uc_catalog extension due to HTTP client issues
         return self
 
     def _install_extensions(self) -> None:
         """Install and load required DuckDB extensions."""
-        extensions = ["postgres", "iceberg", "httpfs"]
+        extensions = ["postgres", "iceberg", "httpfs", "delta"]
 
         for ext in extensions:
             self.conn.execute(f"INSTALL {ext};")
@@ -219,7 +223,10 @@ def create_engine(
     pg_config = PostgresConfig(host=postgres_host, port=postgres_port)
     s3_config = S3Config(endpoint=minio_endpoint)
 
-    engine = UnifiedQueryEngine(postgres_config=pg_config, s3_config=s3_config)
+    engine = UnifiedQueryEngine(
+        postgres_config=pg_config,
+        s3_config=s3_config,
+    )
 
     return engine.setup()
 

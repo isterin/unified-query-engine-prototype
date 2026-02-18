@@ -47,9 +47,11 @@ services:
       mc alias set myminio http://minio:9000 minioadmin minioadmin;
       mc mb myminio/analytics --ignore-existing;
       mc mb myminio/inventory --ignore-existing;
+      mc mb myminio/delta --ignore-existing;
       mc anonymous set public myminio/analytics;
       mc anonymous set public myminio/inventory;
-      echo 'MinIO buckets created: analytics, inventory';
+      mc anonymous set public myminio/delta;
+      echo 'MinIO buckets created: analytics, inventory, delta';
       exit 0;
       "
 
