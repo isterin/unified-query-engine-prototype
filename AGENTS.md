@@ -4,89 +4,51 @@ Guidelines for AI coding agents working in this repository.
 
 ## Project Overview
 
-This is a **Unified Query Engine Prototype** using DuckDB to execute federated queries across:
-- PostgreSQL (transactional data: customers, products)
-- Two separate Iceberg catalogs stored in MinIO S3:
-  - **Analytics catalog** (`s3://analytics/`): orders, events
-  - **Inventory catalog** (`s3://inventory/`): suppliers, inventory_levels, shipments
-- **Delta Lake** (`s3://delta/`): product_reviews
+Unified Query Engine Prototype using DuckDB for federated queries across:
+- **PostgreSQL** (transactional): customers, products -- accessed as `postgres_db.public.<table>`
+- **Iceberg/Analytics** (`s3://analytics/`): orders, events -- accessed via `iceberg_scan()`
+- **Iceberg/Inventory** (`s3://inventory/`): suppliers, inventory_levels, shipments
+- **Delta Lake** (`s3://delta/`): product_reviews -- accessed via `delta_scan()`
 
-## Build Commands
+Key classes: `UnifiedQueryEngine` (low-level DuckDB conn, `src/connections.py`) and
+`QueryEngine` (high-level API with `iceberg()`/`delta()` helpers, `src/query_engine.py`).
+
+## Build & Infrastructure
 
 ```bash
-# Install dependencies (uses uv for package management)
-uv sync
-
-# Full setup: install deps, start Docker, create Iceberg and Delta tables
-task setup
-
-# Start/stop Docker services (PostgreSQL + MinIO)
-task up
-task down
-
-# Reset everything (removes all data)
-task reset
+uv sync                    # Install dependencies (uses uv, not pip)
+task setup                 # Full setup: uv sync + Docker + create Iceberg/Delta tables
+task up / task down        # Start/stop Docker (PostgreSQL on :5433, MinIO on :9000)
+task reset                 # Destroy all data and rebuild
 ```
 
 ## Test Commands
 
 ```bash
-# Run all tests
-uv run pytest
-
-# Run a single test file
-uv run pytest tests/test_query_engine.py
-
-# Run a single test function
-uv run pytest tests/test_query_engine.py::test_function_name
-
-# Run tests with verbose output
-uv run pytest -v
-
-# Run tests matching a pattern
-uv run pytest -k "pattern"
+uv run pytest                                          # Run all tests
+uv run pytest tests/test_query_engine.py               # Single test file
+uv run pytest tests/test_query_engine.py::test_name    # Single test function
+uv run pytest -k "pattern"                             # Tests matching a pattern
 ```
 
-## Lint Commands
+## Lint & Format
+
+No explicit ruff config exists; all ruff defaults apply (88-char line length, E+F rules).
 
 ```bash
-# Check code with ruff
-uv run ruff check .
-
-# Fix auto-fixable issues
-uv run ruff check . --fix
-
-# Format code with ruff
-uv run ruff format .
-
-# Check formatting without applying
-uv run ruff format . --check
+uv run ruff check .             # Lint
+uv run ruff check . --fix       # Auto-fix lint issues
+uv run ruff format .            # Format code
+uv run ruff format . --check    # Check formatting without applying
 ```
 
-## Running Scripts
+Run both `ruff check` and `ruff format` before committing.
 
-```bash
-# Run the example cross-source queries
-uv run python examples/cross_source_queries.py
-
-# Run the Iceberg setup script
-uv run python src/setup_iceberg.py
-
-# Run the Delta Lake setup script
-uv run python src/setup_delta.py
-
-# Test connections
-uv run python src/connections.py
-```
-
-## Code Style Guidelines
+## Code Style
 
 ### Imports
 
-Order imports in three groups separated by blank lines:
-1. Standard library imports
-2. Third-party imports
-3. Local imports (relative with `.`)
+Three groups separated by blank lines: (1) stdlib, (2) third-party, (3) local (relative).
 
 ```python
 import random
@@ -105,163 +67,107 @@ from .connections import PostgresConfig, UnifiedQueryEngine
 - **Line length**: 88 characters (ruff default)
 - **Indentation**: 4 spaces
 - **Quotes**: Double quotes for strings
-- **Trailing commas**: Use in multi-line collections
-- Run `uv run ruff format .` before committing
+- **Trailing commas**: Use in multi-line collections and function calls
 
 ### Type Hints
 
-Use type hints for function signatures. Prefer `Optional[T]` over `T | None` for consistency:
+Use type hints on all function signatures. Prefer `Optional[T]` over `T | None`:
 
 ```python
-def query(self, sql: str) -> pd.DataFrame:
-    """Execute a SQL query and return results."""
-    ...
-
-def create_engine(
-    postgres_host: str = "localhost",
-    postgres_port: int = 5433,
-) -> UnifiedQueryEngine:
-    ...
+def query(self, sql: str) -> pd.DataFrame: ...
+def create_engine(host: str = "localhost", port: int = 5433) -> UnifiedQueryEngine: ...
 ```
 
-### Docstrings
-
-Use triple-quoted docstrings for modules, classes, and public functions:
-
+Type-annotate instance variables in `__init__`:
 ```python
-def function_name(arg: str) -> int:
-    """
-    Brief description of what the function does.
-
-    Args:
-        arg: Description of the argument
-
-    Returns:
-        Description of return value
-    """
+self._conn: Optional[duckdb.DuckDBPyConnection] = None
 ```
 
-### Naming Conventions
+### Naming
 
 - **Variables/functions**: `snake_case`
 - **Classes**: `PascalCase`
-- **Constants**: `SCREAMING_SNAKE_CASE`
-- **Private methods**: `_leading_underscore`
+- **Constants**: `SCREAMING_SNAKE_CASE` (e.g., `NUM_CUSTOMERS = 10_000`)
+- **Private methods/attrs**: `_leading_underscore`
+
+### Docstrings
+
+Google-style with `Args:`/`Returns:` sections. Use triple-quoted strings on modules,
+classes, and public functions. Short one-liners are fine for simple methods.
 
 ```python
-NUM_CUSTOMERS = 10_000
-BATCH_SIZE_ORDERS = 200_000
+def execute(self, sql: str) -> pd.DataFrame:
+    """Execute a SQL query and return results as a DataFrame.
 
-class QueryEngine:
-    def _configure_s3(self) -> None:
-        ...
+    Args:
+        sql: SQL query string
+
+    Returns:
+        Query results as a pandas DataFrame
+    """
 ```
 
 ### Error Handling
 
-- Use specific exception types over bare `except:`
-- Log warnings for non-fatal issues; raise for fatal ones
-- Use `try/except` for external service calls (DB, S3)
+- Use specific exception types; avoid bare `except:`
+- Non-fatal failures (e.g., optional service unavailable): catch and `print()` a warning
+- Fatal/invalid input: raise `ValueError` or appropriate exception
+- External service calls (DB, S3): always wrap in `try/except`
+- Use `try/finally` for cleanup (e.g., closing connections)
 
 ```python
 try:
-    self.conn.execute(f"ATTACH '{pg.connection_string}' AS postgres_db...")
+    self.conn.execute(f"ATTACH '{pg.connection_string}' AS postgres_db ...")
 except Exception as e:
     print(f"Warning: Could not attach PostgreSQL: {e}")
 ```
 
-### SQL in Python
+### Dataclasses & SQL in Python
 
-- Use f-strings for SQL with dynamic table names
-- Use triple-quoted strings for multi-line SQL
-- Indent SQL consistently within Python strings
-
-```python
-result = qe.query(f"""
-    SELECT 
-        c.name,
-        COUNT(o.order_id) as total_orders
-    FROM postgres_db.public.customers c
-    JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
-    GROUP BY c.name
-""")
-```
-
-### Dataclasses
-
-Use `@dataclass` for configuration objects with sensible defaults:
+Use `@dataclass` with sensible defaults for configuration objects. Derive computed
+values via `@property`:
 
 ```python
 @dataclass
 class PostgresConfig:
     host: str = "localhost"
     port: int = 5433
-    database: str = "warehouse"
 
     @property
     def connection_string(self) -> str:
-        return f"host={self.host} port={self.port}..."
+        return f"host={self.host} port={self.port} ..."
 ```
 
-## Architecture Notes
-
-### Data Sources
-
-| Source | Type | Location | Tables |
-|--------|------|----------|--------|
-| PostgreSQL | Transactional | `postgres_db.public.*` | customers, products |
-| Analytics | Iceberg | `s3://analytics/` | orders, events |
-| Inventory | Iceberg | `s3://inventory/` | suppliers, inventory_levels, shipments |
-| Unity | Delta Lake | `s3://delta/` | product_reviews |
-
-### Key Classes
-
-- `UnifiedQueryEngine` (`src/connections.py`): Low-level DuckDB connection with extensions
-- `QueryEngine` (`src/query_engine.py`): High-level API with Iceberg table helpers
-
-### Querying Iceberg Tables
-
-Use `iceberg_scan()` for Iceberg tables, not direct table references:
+Use f-strings with triple quotes for multi-line SQL. Use `qe.iceberg("table")` /
+`qe.delta("table")` helpers for scan expressions. Indent SQL body consistently.
 
 ```python
-# Correct
-qe.query(f"SELECT * FROM {qe.iceberg('orders')} LIMIT 10")
-
-# Also correct (raw)
-qe.query("SELECT * FROM iceberg_scan('s3://analytics/default/orders')")
+result = qe.query(f"""
+    SELECT c.name, COUNT(o.order_id) AS total_orders
+    FROM postgres_db.public.customers c
+    JOIN {qe.iceberg("orders")} o ON c.id = o.customer_id
+    GROUP BY c.name
+""")
 ```
 
-### Querying Delta Lake Tables
+## Architecture
 
-Use `qe.delta()` helper for Delta Lake tables:
+### Data Source Reference
 
-```python
-# Correct
-qe.query(f"SELECT * FROM {qe.delta('product_reviews')} LIMIT 10")
+| Source | Type | Query Pattern | Tables |
+|--------|------|---------------|--------|
+| PostgreSQL | Transactional | `postgres_db.public.<table>` | customers, products |
+| Analytics | Iceberg | `qe.iceberg("<table>")` | orders, events |
+| Inventory | Iceberg | `qe.iceberg("<table>")` | suppliers, inventory_levels, shipments |
+| Delta | Delta Lake | `qe.delta("<table>")` | product_reviews |
 
-# Also correct (raw)
-qe.query("SELECT * FROM delta_scan('s3://delta/product_reviews') LIMIT 10")
-```
+### Key Files
 
-## Dependencies
-
-Managed via `uv` with `pyproject.toml`. Key dependencies:
-- `duckdb>=1.2.0` - Query engine
-- `pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.9.0` - Iceberg table management
-- `pandas>=2.0.0` - DataFrame results
-- `pyarrow>=15.0.0` - Arrow columnar format
-- `psycopg2-binary>=2.9.0` - PostgreSQL driver
-- `deltalake>=1.0.0` - Delta Lake table management
-
-## Common Tasks
-
-```bash
-# Verify infrastructure is running
-docker compose ps
-
-# Check MinIO buckets
-docker compose exec minio mc ls local/
-
-# Connect to PostgreSQL
-docker compose exec postgres psql -U postgres -d warehouse
-```
+| File | Purpose |
+|------|---------|
+| `src/connections.py` | `UnifiedQueryEngine` -- DuckDB connection, extensions, S3/PG setup |
+| `src/query_engine.py` | `QueryEngine` -- high-level API, table registry, scan helpers |
+| `src/setup_iceberg.py` | Creates Iceberg tables with synthetic data via PyIceberg |
+| `src/setup_delta.py` | Creates Delta Lake tables with synthetic data via deltalake |
+| `infrastructure/postgres/init.sql` | PostgreSQL schema + seed data (10k customers, 10 products) |
+| `docker-compose.yml` | PostgreSQL (port 5433) + MinIO (port 9000) + bucket setup |
